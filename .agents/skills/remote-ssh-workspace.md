@@ -42,7 +42,8 @@
 
 ## Credentials and host keys
 
-- SSH private keys, passwords, passphrases, agent protocol data, session cookies, and startup tokens stay in the bridge process and never enter browser storage or logs.
+- The complete session URL containing the one-time startup token may be written once to process stdout during startup. It must never enter the bridge's structured in-memory log, configuration files, or browser storage; never repeat it after startup, and invalidate its token after the first successful exchange.
+- SSH private keys, passwords, passphrases, agent protocol data, and session cookies stay in the bridge process and never enter browser storage or logs.
 - Profiles may store authentication preferences and an identity-file path, but never secret values or private-key contents. Write bridge configuration atomically with restrictive permissions.
 - Prompt IDs bind session-only passwords and passphrases to one connection attempt; discard the secret immediately after the attempt.
 - Clear browser secret inputs before the prompt response finishes and whenever a prompt closes. Host-key prompts show the algorithm and fingerprint and default to no trust until the user explicitly continues.

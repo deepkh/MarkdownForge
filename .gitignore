@@ -1,4 +1,6 @@
 plan/
 log/
-bin/
+bin/*
+!bin/build.sh
+!bin/run_bridge.sh
 build/

@@ -5,12 +5,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
-	"runtime"
 	"syscall"
 	"time"
 
@@ -32,7 +31,6 @@ func run(arguments []string) error {
 	listenAddress := flags.String("listen", appserver.DefaultListenAddress, "loopback listen address")
 	webRoot := flags.String("web-root", ".", "LocalDraftAI repository web root")
 	configDir := flags.String("config-dir", "", "bridge configuration directory")
-	noOpen := flags.Bool("no-open", false, "do not open a browser")
 	logLevel := flags.String("log-level", "info", "bridge log level")
 	unsafeNonLoopback := flags.Bool("unsafe-non-loopback", false, "allow a non-loopback development listener")
 	if err := flags.Parse(arguments[1:]); err != nil {
@@ -67,10 +65,8 @@ func run(arguments []string) error {
 		errCh <- server.Serve(listener)
 	}()
 	log.Printf("LocalDraft Bridge %s listening at %s", appserver.BridgeVersion, server.Origin())
-	if !*noOpen {
-		if err := openBrowser(server.StartupURL()); err != nil {
-			log.Printf("could not open the browser automatically")
-		}
+	if err := writeStartupURL(os.Stdout, server.StartupURL()); err != nil {
+		return fmt.Errorf("print startup URL: %w", err)
 	}
 
 	signals := make(chan os.Signal, 1)
@@ -86,17 +82,7 @@ func run(arguments []string) error {
 	}
 }
 
-func openBrowser(target string) error {
-	var command *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		command = exec.Command("open", target)
-	case "windows":
-		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", target)
-	default:
-		command = exec.Command("xdg-open", target)
-	}
-	command.Stdout = nil
-	command.Stderr = nil
-	return command.Start()
+func writeStartupURL(writer io.Writer, startupURL string) error {
+	_, err := fmt.Fprintln(writer, startupURL)
+	return err
 }

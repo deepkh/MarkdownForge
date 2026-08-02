@@ -70,14 +70,28 @@ Development options:
 
 ```text
 --config-dir <path>
---no-open
 --log-level debug|info|warn|error
 --unsafe-non-loopback
 ```
 
 The default listener is `127.0.0.1:4782`. A non-loopback listener is rejected unless `--unsafe-non-loopback` is explicitly supplied; that flag is for isolated development only and is not a supported deployment mode.
 
-At startup the bridge generates a cryptographically random 32-byte token and opens its one-time session URL without printing the token. The exchange invalidates the token, sets the browser session cookie, and redirects to `/src/local_draft_ai.html`. The WebSocket rejects missing sessions, missing origins, public origins, and any origin whose host and port do not exactly match the bridge.
+At startup, the bridge writes the complete one-time session URL to stdout. It never launches a browser. Copy and open:
+
+```text
+http://127.0.0.1:4782/api/session?token=<SESSION_TOKEN>
+```
+
+The process output contract is:
+
+```text
+stdout: one-time session URL
+stderr: bridge logs and diagnostics
+```
+
+The URL contains a cryptographically random token that is invalidated after its first successful exchange. It is not added to the bridge's structured in-memory log, written to configuration, or stored in browser storage, but the URL may be captured by any process supervising stdout. The URL grants a browser session to the local bridge until its token is successfully consumed. Do not share it or store it in configuration.
+
+The successful exchange sets the browser session cookie and redirects to `/src/local_draft_ai.html`. The WebSocket rejects missing sessions, missing origins, public origins, and any origin whose host and port do not exactly match the bridge.
 
 ## SSH configuration and trust
 

@@ -174,6 +174,29 @@ cd ..
 ./build/localdraft-bridge serve --listen 127.0.0.1:4782 --web-root .
 ```
 
+The bridge stays in the foreground and never starts a browser. To open an authenticated bridge session:
+
+1. Start the bridge.
+2. Copy and open the complete session URL printed on stdout:
+
+   ```text
+   http://127.0.0.1:4782/api/session?token=<SESSION_TOKEN>
+   ```
+
+3. Keep the bridge process running.
+
+Operational logs, including the listening address, are written to stderr. Stdout contains only the one-time session URL. A process supervisor can capture that stream; expressed as shell command substitution, the stdout contract is:
+
+```bash
+SESSION_URL="$(
+  ./build/localdraft-bridge serve \
+    --listen 127.0.0.1:4782 \
+    --web-root .
+)"
+```
+
+Do not use plain command substitution for a normal interactive launch: because the bridge remains running, the shell does not assign `SESSION_URL` until the process exits.
+
 GitHub Actions also builds the bridge for Linux x86-64, Linux AArch64, and Windows x64 through [`.github/workflows/bridge-binaries.yml`](.github/workflows/bridge-binaries.yml). Every successful workflow run publishes one binary artifact per platform for 30 days. A pushed `v*` tag creates a GitHub Release containing all three binaries and `SHA256SUMS.txt`.
 
 Downloaded binaries still need the static frontend from this repository. Run them from the repository root with `--web-root .`; on Linux, first make the downloaded file executable:

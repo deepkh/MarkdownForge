@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 
+import { firstBridgeStartupURL } from "./remote-ssh-test-harness.mjs";
+
 const repoRoot = process.cwd();
 const bridgeRoot = path.join(repoRoot, "bridge");
 const bridgePort = Number(process.env.LOCALDRAFTAI_REMOTE_E2E_PORT || 8781);
@@ -28,21 +30,6 @@ async function waitForFetch(url, timeoutMs = 15000) {
     await delay(100);
   }
   throw lastError || new Error(`Timed out waiting for ${url}`);
-}
-
-async function waitForFile(filePath, timeoutMs = 10000) {
-  const started = Date.now();
-
-  while (Date.now() - started < timeoutMs) {
-    try {
-      const value = fs.readFileSync(filePath, "utf8").trim();
-      if (value.startsWith("http://")) return value;
-    } catch (error) {
-      // The bridge has not invoked the test browser opener yet.
-    }
-    await delay(100);
-  }
-  throw new Error("Timed out waiting for the bridge startup URL.");
 }
 
 async function firstJsonLine(child, timeoutMs = 10000) {
@@ -170,8 +157,6 @@ async function main() {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "localdraftai-remote-e2e-"));
   const remoteRoot = path.join(tempRoot, "remote");
   const configDir = path.join(tempRoot, "config");
-  const binDir = path.join(tempRoot, "bin");
-  const openUrlFile = path.join(tempRoot, "startup-url");
   const userDataDir = path.join(tempRoot, "chrome");
   const sshBinary = path.join(tempRoot, "testssh");
   const bridgeBinary = path.join(tempRoot, "localdraft-bridge");
@@ -182,14 +167,12 @@ async function main() {
 
   fs.mkdirSync(path.join(remoteRoot, "empty"), { recursive: true });
   fs.mkdirSync(path.join(remoteRoot, "plans"), { recursive: true });
-  fs.mkdirSync(binDir, { recursive: true });
   fs.writeFileSync(path.join(remoteRoot, "README.md"), "\ufeff# Remote Notes\r\n\r\nBridge workspace.\r\n");
   fs.writeFileSync(path.join(remoteRoot, "notes.txt"), "plain remote text\n");
   fs.writeFileSync(path.join(remoteRoot, "settings.json"), "{\n  \"remote\": true\n}\n");
   fs.writeFileSync(path.join(remoteRoot, "config.yaml"), "remote: true\n");
   fs.writeFileSync(path.join(remoteRoot, "image.png"), "not-an-image");
   fs.writeFileSync(path.join(remoteRoot, "plans", "project.md"), "# Project\n");
-  fs.writeFileSync(path.join(binDir, "xdg-open"), "#!/bin/sh\numask 077\nprintf '%s' \"$1\" > \"$LOCALDRAFTAI_OPEN_URL_FILE\"\n", { mode: 0o700 });
 
   try {
     buildGoBinary(sshBinary, "./internal/testssh/cmd");
@@ -206,22 +189,19 @@ async function main() {
       "--web-root", repoRoot,
       "--config-dir", configDir
     ], {
-      env: {
-        ...process.env,
-        LOCALDRAFTAI_OPEN_URL_FILE: openUrlFile,
-        PATH: `${binDir}:${process.env.PATH || ""}`
-      },
-      stdio: "ignore"
+      env: process.env,
+      stdio: ["ignore", "pipe", "inherit"]
     });
+    const startupUrl = await firstBridgeStartupURL(bridgeProcess);
     await waitForFetch(`http://127.0.0.1:${bridgePort}/api/health`);
-    const startupUrl = await waitForFile(openUrlFile);
-    fs.rmSync(openUrlFile, { force: true });
     fs.mkdirSync(userDataDir, { recursive: true });
-    chromeProcess = startChrome(userDataDir, startupUrl);
+    chromeProcess = startChrome(userDataDir, startupUrl.href);
     connection = await connectToPage();
     const { send } = connection;
 
-    await waitFor(send, "Boolean(window.MarkdownEditor && window.MarkdownEditor.activeBridgeClient)");
+    await waitFor(send, `location.pathname === "/src/local_draft_ai.html" && Boolean(window.MarkdownEditor && window.MarkdownEditor.activeBridgeClient)`);
+    const reusedTokenResponse = await fetch(startupUrl, { redirect: "manual" });
+    assert.equal(reusedTokenResponse.status, 401);
     await evaluate(send, "location.replace('/src/local_draft_ai.html?e2e')");
     await delay(250);
     await waitFor(send, "Boolean(window.MarkdownEditor && window.MarkdownEditor.__testApi && window.MarkdownEditor.activeBridgeClient)");

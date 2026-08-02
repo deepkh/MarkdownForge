@@ -24,21 +24,6 @@ async function waitForFetch(url, timeoutMs = 15000) {
   throw lastError || new Error(`Timed out waiting for ${url}`);
 }
 
-async function waitForFile(filePath, timeoutMs = 10000) {
-  const started = Date.now();
-
-  while (Date.now() - started < timeoutMs) {
-    try {
-      const value = fs.readFileSync(filePath, "utf8").trim();
-      if (value.startsWith("http://")) return value;
-    } catch (error) {
-      // The bridge has not invoked the test browser opener yet.
-    }
-    await delay(100);
-  }
-  throw new Error("Timed out waiting for the bridge startup URL.");
-}
-
 async function firstJsonLine(child, timeoutMs = 10000) {
   const lines = readline.createInterface({ input: child.stdout });
   const timeout = delay(timeoutMs).then(() => { throw new Error("Timed out starting the SSH test server."); });
@@ -51,6 +36,63 @@ async function firstJsonLine(child, timeoutMs = 10000) {
   ]);
   lines.close();
   return JSON.parse(line);
+}
+
+export function firstBridgeStartupURL(child, timeoutMs = 10000) {
+  return new Promise((resolve, reject) => {
+    if (!child.stdout) {
+      reject(new Error("Bridge stdout is not available for startup URL capture."));
+      return;
+    }
+
+    const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+    const timeout = setTimeout(() => {
+      finish(new Error("Timed out waiting for the bridge startup URL."));
+    }, timeoutMs);
+
+    function cleanup() {
+      clearTimeout(timeout);
+      lines.removeListener("line", onLine);
+      child.removeListener("error", onError);
+      child.removeListener("exit", onExit);
+      lines.close();
+    }
+
+    function finish(error, startupUrl) {
+      cleanup();
+      if (error) reject(error);
+      else resolve(startupUrl);
+    }
+
+    function onLine(line) {
+      if (line === "") return;
+      let startupUrl;
+      try {
+        startupUrl = new URL(line);
+      } catch (error) {
+        finish(new Error(`Bridge stdout did not contain a valid startup URL: ${JSON.stringify(line)}`));
+        return;
+      }
+      if (startupUrl.protocol !== "http:" || startupUrl.pathname !== "/api/session" || !/^[A-Za-z0-9_-]+$/.test(startupUrl.searchParams.get("token") || "")) {
+        finish(new Error(`Bridge stdout did not contain a valid session URL: ${JSON.stringify(line)}`));
+        return;
+      }
+      finish(null, startupUrl);
+    }
+
+    function onError(error) {
+      finish(new Error(`Bridge failed before printing a startup URL: ${error.message}`));
+    }
+
+    function onExit(code, signal) {
+      const detail = signal ? `signal ${signal}` : `code ${code}`;
+      finish(new Error(`Bridge exited with ${detail} before printing a startup URL.`));
+    }
+
+    lines.on("line", onLine);
+    child.once("error", onError);
+    child.once("exit", onExit);
+  });
 }
 
 function buildGoBinary(bridgeRoot, output, packagePath) {
@@ -177,8 +219,6 @@ export async function startRemoteWorkspaceFixture(options = {}) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), options.prefix || "localdraftai-remote-recovery-e2e-"));
   const remoteRoot = path.join(tempRoot, "remote");
   const configDir = path.join(tempRoot, "config");
-  const binDir = path.join(tempRoot, "bin");
-  const openUrlFile = path.join(tempRoot, "startup-url");
   const userDataDir = path.join(tempRoot, "chrome");
   const sshBinary = path.join(tempRoot, "testssh");
   const bridgeBinary = path.join(tempRoot, "localdraft-bridge");
@@ -188,9 +228,7 @@ export async function startRemoteWorkspaceFixture(options = {}) {
   let connection;
 
   fs.mkdirSync(remoteRoot, { recursive: true });
-  fs.mkdirSync(binDir, { recursive: true });
   writeFixtureFiles(remoteRoot, options.files || { "README.md": "# Remote Notes\n" });
-  fs.writeFileSync(path.join(binDir, "xdg-open"), "#!/bin/sh\numask 077\nprintf '%s' \"$1\" > \"$LOCALDRAFTAI_OPEN_URL_FILE\"\n", { mode: 0o700 });
 
   async function cleanup() {
     if (connection) connection.ws.close();
@@ -217,22 +255,21 @@ export async function startRemoteWorkspaceFixture(options = {}) {
       "--web-root", repoRoot,
       "--config-dir", configDir
     ], {
-      env: {
-        ...process.env,
-        LOCALDRAFTAI_OPEN_URL_FILE: openUrlFile,
-        PATH: `${binDir}:${process.env.PATH || ""}`
-      },
-      stdio: "ignore"
+      env: process.env,
+      stdio: ["ignore", "pipe", "inherit"]
     });
+    const startupUrl = await firstBridgeStartupURL(bridgeProcess);
     await waitForFetch(`http://127.0.0.1:${bridgePort}/api/health`);
-    const startupUrl = await waitForFile(openUrlFile);
-    fs.rmSync(openUrlFile, { force: true });
     fs.mkdirSync(userDataDir, { recursive: true });
-    chromeProcess = startChrome(userDataDir, startupUrl, debugPort);
+    chromeProcess = startChrome(userDataDir, startupUrl.href, debugPort);
     connection = await connectToPage(debugPort);
     const { send } = connection;
 
-    await waitFor(send, "Boolean(window.MarkdownEditor && window.MarkdownEditor.activeBridgeClient)");
+    await waitFor(send, `location.pathname === "/src/local_draft_ai.html" && Boolean(window.MarkdownEditor && window.MarkdownEditor.activeBridgeClient)`);
+    const reusedTokenResponse = await fetch(startupUrl, { redirect: "manual" });
+    if (reusedTokenResponse.status !== 401) {
+      throw new Error(`Reused bridge startup token returned HTTP ${reusedTokenResponse.status}, expected 401.`);
+    }
     await evaluate(send, "location.replace('/src/local_draft_ai.html?e2e')");
     await delay(250);
     await waitFor(send, "Boolean(window.MarkdownEditor && window.MarkdownEditor.__testApi && window.MarkdownEditor.activeBridgeClient)");

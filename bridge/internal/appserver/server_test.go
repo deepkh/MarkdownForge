@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -78,7 +79,7 @@ func exchangeSession(t *testing.T, bridge *testBridge) *http.Cookie {
 	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
-	response, err := client.Get(bridge.server.StartupURL())
+	response, err := client.Get(startupURL(bridge.server))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,6 +97,10 @@ func exchangeSession(t *testing.T, bridge *testBridge) *http.Cookie {
 	}
 	t.Fatal("session cookie was not set")
 	return nil
+}
+
+func startupURL(server *Server) string {
+	return server.Origin() + "/api/session?token=" + url.QueryEscape(server.StartupToken())
 }
 
 func dialBridge(t *testing.T, bridge *testBridge, cookie *http.Cookie, origin string) *websocket.Conn {
@@ -152,7 +157,7 @@ func TestStartupTokenIsOneTimeAndCookieIsRequired(t *testing.T) {
 	bridge := startTestBridge(t, nil)
 	cookie := exchangeSession(t, bridge)
 	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
-	response, err := client.Get(bridge.server.StartupURL())
+	response, err := client.Get(startupURL(bridge.server))
 	if err != nil {
 		t.Fatal(err)
 	}
