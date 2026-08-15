@@ -8,10 +8,12 @@ import (
 )
 
 type Paths struct {
-	Directory       string
-	ConnectionsFile string
-	KnownHostsFile  string
-	OpenSSHConfig   string
+	Directory         string
+	ConnectionsFile   string
+	SecurityFile      string
+	PairedClientsFile string
+	KnownHostsFile    string
+	OpenSSHConfig     string
 }
 
 func ResolvePaths(configDir string) (Paths, error) {
@@ -27,10 +29,12 @@ func ResolvePaths(configDir string) (Paths, error) {
 		return Paths{}, err
 	}
 	return Paths{
-		Directory:       configDir,
-		ConnectionsFile: filepath.Join(configDir, "connections.json"),
-		KnownHostsFile:  filepath.Join(configDir, "known_hosts"),
-		OpenSSHConfig:   filepath.Join(home, ".ssh", "config"),
+		Directory:         configDir,
+		ConnectionsFile:   filepath.Join(configDir, "connections.json"),
+		SecurityFile:      filepath.Join(configDir, "bridge-settings.json"),
+		PairedClientsFile: filepath.Join(configDir, "paired-clients.json"),
+		KnownHostsFile:    filepath.Join(configDir, "known_hosts"),
+		OpenSSHConfig:     filepath.Join(home, ".ssh", "config"),
 	}, nil
 }
 

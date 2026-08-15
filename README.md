@@ -163,7 +163,9 @@ The hosted and standalone UI uses the `local-fsa` provider. The authenticated br
 
 ### Remote SSH with LocalDraft Bridge
 
-The repository includes an isolated Go bridge module under `bridge/`. It serves the static app from a loopback origin, exchanges a one-time startup token for an HttpOnly strict-same-site session, and exposes an authenticated exact-origin JSON-RPC WebSocket. Browser code detects it only through same-origin `/api/health`, so the hosted site does not probe services on your machine.
+The repository includes one isolated Go bridge module under `bridge/`. LocalDraft Bridge serves HTTPS and WSS directly, keeps SSH/SFTP outside the browser, checks the configured public Host and exact HTTPS frontend origin, and authenticates browsers with paired non-exportable WebCrypto keys. There are no separate local-companion or remote-gateway modes.
+
+The bridge requires a certificate and private key. Browsers must trust that certificate. For a production listener:
 
 ```bash
 mkdir -p build
@@ -171,16 +173,23 @@ cd bridge
 go test ./...
 go build -o ../build/localdraft-bridge ./cmd/localdraft-bridge
 cd ..
-./build/localdraft-bridge serve --listen 127.0.0.1:4782 --web-root .
+./build/localdraft-bridge serve \
+  --listen 0.0.0.0:4782 \
+  --public-origin https://bridge.example.com:4782 \
+  --tls-cert /etc/localdraft/fullchain.pem \
+  --tls-key /etc/localdraft/privkey.pem \
+  --web-root .
 ```
 
-The bridge stays in the foreground and never starts a browser. To open an authenticated bridge session:
+`--public-origin` is required for wildcard listeners and names the certificate-covered canonical bridge origin. The safe default listener remains `127.0.0.1:4782`; non-loopback listeners are supported without an unsafe flag. The bridge has no plaintext HTTP or WS listener and does not generate certificates.
+
+The bridge stays in the foreground and never starts a browser. To open its administrator session:
 
 1. Start the bridge.
 2. Copy and open the complete session URL printed on stdout:
 
    ```text
-   http://127.0.0.1:4782/api/session?token=<SESSION_TOKEN>
+   https://bridge.example.com:4782/api/session?token=<SESSION_TOKEN>
    ```
 
 3. Keep the bridge process running.
@@ -191,6 +200,9 @@ Operational logs, including the listening address, are written to stderr. Stdout
 SESSION_URL="$(
   ./build/localdraft-bridge serve \
     --listen 127.0.0.1:4782 \
+    --public-origin https://127.0.0.1:4782 \
+    --tls-cert /path/to/cert.pem \
+    --tls-key /path/to/key.pem \
     --web-root .
 )"
 ```
@@ -203,12 +215,19 @@ Downloaded binaries still need the static frontend from this repository. Run the
 
 ```bash
 chmod +x localdraft-bridge-linux-x86_64
-./localdraft-bridge-linux-x86_64 serve --web-root .
+./localdraft-bridge-linux-x86_64 serve \
+  --tls-cert /path/to/cert.pem \
+  --tls-key /path/to/key.pem \
+  --web-root .
 ```
 
-On Windows, run `localdraft-bridge-windows-x64.exe serve --web-root .` from the repository root.
+On Windows, supply `--tls-cert` and `--tls-key` when running `localdraft-bridge-windows-x64.exe serve --web-root .` from the repository root.
 
-The bridge also stores non-secret SSH profiles, discovers supported exact aliases from OpenSSH config, verifies host keys against its own `known_hosts`, authenticates through an agent, identity file, session-only passphrase, or session-only password, and starts SFTP after connection. When the app is opened from the bridge, the left side of the Status Bar provides SSH connection commands, and the Workspace menu can manage profiles, confirm first-use host keys, collect session-only secrets, browse remote folders, and show the redacted connection log.
+The one-time token creates a `Secure`, HttpOnly, `SameSite=Strict` Bridge Admin cookie. It is used only for same-origin bridge security administration; ordinary WSS authentication uses a paired browser key instead. The bridge-served frontend automatically derives its own WSS endpoint and auto-pairs the browser when the administrator session is valid.
+
+The hosted frontend can also use the same bridge. Open `Bridge Settings`, store a `wss://bridge.example.com:4782/api/bridge` endpoint, and approve the displayed six-digit request from the bridge-served administrator UI. The bridge initially allows `https://localdraft.ai`; exact HTTPS origins can be added or removed by an administrator. Wildcards, HTTP origins, paths, credentials, queries, and fragments are rejected. Removing an origin closes its active non-admin sockets, while revoking a paired browser deletes its public-key record and closes its active sockets.
+
+The bridge also stores non-secret SSH profiles, discovers supported exact aliases from OpenSSH config, verifies host keys against its own `known_hosts`, authenticates through an agent, identity file, session-only passphrase, or session-only password, and starts SFTP after connection. Once a bridge connection is paired, the left side of the Status Bar provides SSH connection commands, and the Workspace menu can manage profiles, confirm first-use host keys, collect session-only secrets, browse remote folders, and show the redacted connection log.
 
 After connecting, use `Workspace -> Open Remote Folder…`. The bridge canonicalizes the folder and confines every operation to it; the Explorer lists only the root initially and loads a directory when you expand it. Unsupported files stay hidden, empty directories remain visible, and Markdown, plain text, JSON, and YAML keep their existing editor-mode rules.
 
@@ -220,7 +239,7 @@ Remote workspace metadata is stored separately from local handles and restores o
 
 Relative PNG, JPEG, WebP, and GIF references in remote Markdown are read through authenticated, workspace-scoped `fs.readBinary` calls and displayed with per-tab object URLs. Missing, invalid, oversized, or outside-workspace paths fail visibly. Pasted, dropped, or explicitly inserted images create or reuse the remote root's `assets/` folder, choose a safe unique name, write exact bytes through `fs.writeBinary`, and insert a Markdown-relative link; nested documents receive the required `../` components. Binary RPCs use 4 MB chunks so the 25 MB asset limit stays below the 16 MB JSON-message limit. Object URLs are revoked on tab close or document reload, and remote asset operations never fall back to a local folder picker. See [`bridge/README.md`](bridge/README.md) for the security boundary, configuration paths, supported SSH options, limits, and development flags.
 
-Remote SSH in this release requires opening the bridge-served app at its loopback origin. The hosted `https://localdraft.ai/` application remains local-browser editing only and does not connect to or probe a loopback bridge. Remote terminals, command execution, Git tooling, port forwarding, proxy commands, offline mirrors, deletion, multiple active hosts, mixed local/remote workspace tabs, persistent dirty-buffer crash recovery, and Windows-style remote roots are not supported.
+Remote SSH works from either `https://localdraft.ai` with a configured, allowed, paired WSS bridge or the bridge-served `https://bridge.example.com:4782/src/local_draft_ai.html` frontend with automatic same-origin endpoint resolution. A hosted page with no configured endpoint does not probe loopback and remains local-browser editing only. Remote terminals, command execution, Git tooling, port forwarding, proxy commands, offline mirrors, deletion, multiple active hosts, mixed local/remote workspace tabs, persistent dirty-buffer crash recovery, and Windows-style remote roots are not supported.
 
 Use the hosted static app:
 
@@ -837,7 +856,9 @@ Add stricter rules to the prompt, for example:
 | `src/js/storage-resource.js` | Provider-neutral document resource identity and revisions |
 | `src/js/storage-provider-registry.js` | Storage provider registration and normalized errors |
 | `src/js/local-filesystem-provider.js` | Local File System Access storage provider |
-| `src/js/bridge-client.js` | Authenticated same-origin bridge JSON-RPC client |
+| `src/js/bridge-client.js` | Configurable authenticated WSS bridge JSON-RPC client |
+| `src/js/bridge-auth-store.js` | Non-exportable WebCrypto browser identity persistence |
+| `src/js/bridge-settings.js` | Unified bridge endpoint, pairing, and security settings UI |
 | `src/js/remote-ssh-provider.js` | Remote SSH document and workspace storage provider |
 | `src/js/remote-connection-ui.js` | SSH profiles, prompts, remote folder selection, and logs |
 | `src/js/remote-status.js` | Remote connection Status Bar state |

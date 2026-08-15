@@ -2,7 +2,18 @@ package appserver
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +28,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	bridgeconfig "localdraftai/bridge/internal/config"
 	"localdraftai/bridge/internal/protocol"
 	"localdraftai/bridge/internal/testssh"
 )
@@ -26,6 +38,38 @@ type testBridge struct {
 	listener net.Listener
 	done     chan error
 	root     string
+}
+
+func writeTestCertificate(t *testing.T, directory string) (string, string) {
+	t.Helper()
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "127.0.0.1"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPath := filepath.Join(directory, "tls-cert.pem")
+	keyPath := filepath.Join(directory, "tls-key.pem")
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certPath, keyPath
+}
+
+func testHTTPClient() *http.Client {
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
 }
 
 func startTestBridge(t *testing.T, configure func(*Config)) *testBridge {
@@ -44,8 +88,12 @@ func startTestBridge(t *testing.T, configure func(*Config)) *testBridge {
 	if err != nil {
 		t.Fatal(err)
 	}
+	certPath, keyPath := writeTestCertificate(t, root)
 	config := Config{
 		ListenAddress:    listener.Addr().String(),
+		PublicOrigin:     "https://" + listener.Addr().String(),
+		TLSCertFile:      certPath,
+		TLSKeyFile:       keyPath,
 		WebRoot:          root,
 		ConfigDir:        filepath.Join(root, "config"),
 		OperationTimeout: time.Second,
@@ -76,9 +124,10 @@ func startTestBridge(t *testing.T, configure func(*Config)) *testBridge {
 
 func exchangeSession(t *testing.T, bridge *testBridge) *http.Cookie {
 	t.Helper()
-	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+	client := testHTTPClient()
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
-	}}
+	}
 	response, err := client.Get(startupURL(bridge.server))
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +138,7 @@ func exchangeSession(t *testing.T, bridge *testBridge) *http.Cookie {
 	}
 	for _, cookie := range response.Cookies() {
 		if cookie.Name == sessionCookieName {
-			if !cookie.HttpOnly || cookie.SameSite != http.SameSiteStrictMode {
+			if !cookie.HttpOnly || !cookie.Secure || cookie.SameSite != http.SameSiteStrictMode {
 				t.Fatalf("session cookie flags are not strict: %#v", cookie)
 			}
 			return cookie
@@ -106,10 +155,69 @@ func startupURL(server *Server) string {
 func dialBridge(t *testing.T, bridge *testBridge, cookie *http.Cookie, origin string) *websocket.Conn {
 	t.Helper()
 	header := http.Header{}
-	header.Set("Cookie", cookie.String())
+	if cookie != nil {
+		header.Set("Cookie", cookie.String())
+	}
 	header.Set("Origin", origin)
-	connection, response, err := websocket.Dial(context.Background(), strings.Replace(bridge.server.Origin(), "http://", "ws://", 1)+"/api/bridge", &websocket.DialOptions{
+	connection, response, err := websocket.Dial(context.Background(), strings.Replace(bridge.server.Origin(), "https://", "wss://", 1)+"/api/bridge", &websocket.DialOptions{
 		HTTPHeader: header,
+		HTTPClient: testHTTPClient(),
+	})
+	if err != nil {
+		if response != nil {
+			response.Body.Close()
+		}
+		t.Fatal(err)
+	}
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinate := func(value *big.Int) string {
+		bytes := value.FillBytes(make([]byte, 32))
+		return base64.RawURLEncoding.EncodeToString(bytes)
+	}
+	beginPayload, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": "auth-begin", "method": "bridge.auth.begin",
+		"params": map[string]any{"clientId": "test-client", "name": "Test Browser", "publicKey": bridgeconfig.PublicKeyJWK{
+			Kty: "EC", Crv: "P-256", X: coordinate(privateKey.X), Y: coordinate(privateKey.Y),
+		}},
+	})
+	begin := rpcCall(t, connection, string(beginPayload))
+	if begin.Error != nil {
+		t.Fatalf("auth begin error = %#v", begin.Error)
+	}
+	challengeText := begin.Result.(map[string]any)["challenge"].(string)
+	challenge, err := base64.RawURLEncoding.DecodeString(challengeText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(challenge)
+	r, signatureS, err := ecdsa.Sign(rand.Reader, privateKey, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := append(r.FillBytes(make([]byte, 32)), signatureS.FillBytes(make([]byte, 32))...)
+	completePayload, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": "auth-complete", "method": "bridge.auth.complete",
+		"params": map[string]string{"signature": base64.RawURLEncoding.EncodeToString(signature)},
+	})
+	complete := rpcCall(t, connection, string(completePayload))
+	if complete.Error != nil {
+		t.Fatalf("auth complete error = %#v", complete.Error)
+	}
+	return connection
+}
+
+func dialUnauthenticated(t *testing.T, bridge *testBridge, cookie *http.Cookie, origin string) *websocket.Conn {
+	t.Helper()
+	header := http.Header{}
+	if cookie != nil {
+		header.Set("Cookie", cookie.String())
+	}
+	header.Set("Origin", origin)
+	connection, response, err := websocket.Dial(context.Background(), strings.Replace(bridge.server.Origin(), "https://", "wss://", 1)+"/api/bridge", &websocket.DialOptions{
+		HTTPHeader: header, HTTPClient: testHTTPClient(),
 	})
 	if err != nil {
 		if response != nil {
@@ -118,6 +226,46 @@ func dialBridge(t *testing.T, bridge *testBridge, cookie *http.Cookie, origin st
 		t.Fatal(err)
 	}
 	return connection
+}
+
+func testClientKey(t *testing.T) (*ecdsa.PrivateKey, bridgeconfig.PublicKeyJWK) {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinate := func(value *big.Int) string {
+		return base64.RawURLEncoding.EncodeToString(value.FillBytes(make([]byte, 32)))
+	}
+	return privateKey, bridgeconfig.PublicKeyJWK{Kty: "EC", Crv: "P-256", X: coordinate(privateKey.X), Y: coordinate(privateKey.Y)}
+}
+
+func authBeginCall(t *testing.T, connection *websocket.Conn, id string, publicKey bridgeconfig.PublicKeyJWK) protocol.Response {
+	t.Helper()
+	payload, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": "begin", "method": "bridge.auth.begin",
+		"params": map[string]any{"clientId": id, "name": "Test Browser", "publicKey": publicKey},
+	})
+	return rpcCall(t, connection, string(payload))
+}
+
+func authCompleteCall(t *testing.T, connection *websocket.Conn, privateKey *ecdsa.PrivateKey, challengeText string) protocol.Response {
+	t.Helper()
+	challenge, err := base64.RawURLEncoding.DecodeString(challengeText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(challenge)
+	r, signatureS, err := ecdsa.Sign(rand.Reader, privateKey, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := append(r.FillBytes(make([]byte, 32)), signatureS.FillBytes(make([]byte, 32))...)
+	payload, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": "complete", "method": "bridge.auth.complete",
+		"params": map[string]string{"signature": base64.RawURLEncoding.EncodeToString(signature)},
+	})
+	return rpcCall(t, connection, string(payload))
 }
 
 func rpcCall(t *testing.T, connection *websocket.Conn, payload string) protocol.Response {
@@ -139,24 +287,42 @@ func rpcCall(t *testing.T, connection *websocket.Conn, payload string) protocol.
 }
 
 func TestValidateListenAddress(t *testing.T) {
-	if err := ValidateListenAddress("127.0.0.1:4782", false); err != nil {
+	if err := ValidateListenAddress("127.0.0.1:4782"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateListenAddress("[::1]:4782", false); err != nil {
+	if err := ValidateListenAddress("[::1]:4782"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateListenAddress("0.0.0.0:4782", false); err == nil {
-		t.Fatal("non-loopback listener was accepted")
-	}
-	if err := ValidateListenAddress("0.0.0.0:4782", true); err != nil {
+	if err := ValidateListenAddress("0.0.0.0:4782"); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := resolvePublicOrigin("0.0.0.0:4782", ""); err == nil {
+		t.Fatal("wildcard listener did not require public origin")
+	}
+}
+
+func TestTLSAndPublicOriginConfiguration(t *testing.T) {
+	root := t.TempDir()
+	certPath, keyPath := writeTestCertificate(t, root)
+	base := Config{ListenAddress: "127.0.0.1:4782", PublicOrigin: "https://127.0.0.1:4782", TLSCertFile: certPath, TLSKeyFile: keyPath, WebRoot: root}
+	if _, err := New(Config{ListenAddress: base.ListenAddress, PublicOrigin: base.PublicOrigin, WebRoot: root}); err == nil || !strings.Contains(err.Error(), "tls-cert") {
+		t.Fatalf("missing TLS files error = %v", err)
+	}
+	base.PublicOrigin = "http://127.0.0.1:4782"
+	if _, err := New(base); err == nil || !strings.Contains(err.Error(), "public origin") {
+		t.Fatalf("HTTP public origin error = %v", err)
+	}
+	base.PublicOrigin = "https://localhost:4782"
+	if _, err := New(base); err == nil || !strings.Contains(err.Error(), "does not cover") {
+		t.Fatalf("certificate host mismatch error = %v", err)
 	}
 }
 
 func TestStartupTokenIsOneTimeAndCookieIsRequired(t *testing.T) {
 	bridge := startTestBridge(t, nil)
 	cookie := exchangeSession(t, bridge)
-	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	client := testHTTPClient()
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	response, err := client.Get(startupURL(bridge.server))
 	if err != nil {
 		t.Fatal(err)
@@ -166,28 +332,13 @@ func TestStartupTokenIsOneTimeAndCookieIsRequired(t *testing.T) {
 		t.Fatalf("reused token status = %d", response.StatusCode)
 	}
 
-	request := httptest.NewRequest(http.MethodGet, bridge.server.Origin()+"/api/bridge", nil)
-	request.Header.Set("Origin", bridge.server.Origin())
-	recorder := httptest.NewRecorder()
-	bridge.server.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusUnauthorized {
-		t.Fatalf("missing cookie status = %d", recorder.Code)
-	}
-	request = httptest.NewRequest(http.MethodGet, bridge.server.Origin()+"/api/bridge", nil)
-	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "invalid"})
-	request.Header.Set("Origin", bridge.server.Origin())
-	recorder = httptest.NewRecorder()
-	bridge.server.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusUnauthorized {
-		t.Fatalf("invalid cookie status = %d", recorder.Code)
-	}
 	_ = cookie
 }
 
 func TestWebSocketRejectsMissingAndUnexpectedOrigins(t *testing.T) {
 	bridge := startTestBridge(t, nil)
 	cookie := exchangeSession(t, bridge)
-	for _, origin := range []string{"", "https://localdraft.ai"} {
+	for _, origin := range []string{"", "https://evil.example"} {
 		request := httptest.NewRequest(http.MethodGet, bridge.server.Origin()+"/api/bridge", nil)
 		request.AddCookie(cookie)
 		if origin != "" {
@@ -198,6 +349,117 @@ func TestWebSocketRejectsMissingAndUnexpectedOrigins(t *testing.T) {
 		if recorder.Code != http.StatusForbidden {
 			t.Fatalf("origin %q status = %d", origin, recorder.Code)
 		}
+	}
+}
+
+func TestHostMismatchAndUnauthenticatedRPCAreRejected(t *testing.T) {
+	bridge := startTestBridge(t, nil)
+	request := httptest.NewRequest(http.MethodGet, bridge.server.Origin()+"/api/bridge", nil)
+	request.Host = "evil.example"
+	request.Header.Set("Origin", bridge.server.Origin())
+	recorder := httptest.NewRecorder()
+	bridge.server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("Host mismatch status = %d", recorder.Code)
+	}
+
+	connection := dialUnauthenticated(t, bridge, nil, bridge.server.Origin())
+	defer connection.CloseNow()
+	response := rpcCall(t, connection, `{"jsonrpc":"2.0","id":"hello","method":"bridge.hello"}`)
+	if response.Error == nil || response.Error.Data == nil || response.Error.Data.Code != "AUTHENTICATION_REQUIRED" {
+		t.Fatalf("unauthenticated response = %#v", response)
+	}
+}
+
+func TestChallengeRejectsWrongSignatureAndReplay(t *testing.T) {
+	bridge := startTestBridge(t, nil)
+	connection := dialUnauthenticated(t, bridge, exchangeSession(t, bridge), bridge.server.Origin())
+	defer connection.CloseNow()
+	_, publicKey := testClientKey(t)
+	wrongKey, _ := testClientKey(t)
+	begin := authBeginCall(t, connection, "wrong-signature-client", publicKey)
+	if begin.Error != nil {
+		t.Fatalf("begin = %#v", begin.Error)
+	}
+	challenge := begin.Result.(map[string]any)["challenge"].(string)
+	wrong := authCompleteCall(t, connection, wrongKey, challenge)
+	if wrong.Error == nil || wrong.Error.Data.Code != "AUTHENTICATION_REQUIRED" {
+		t.Fatalf("wrong signature = %#v", wrong)
+	}
+	replay := authCompleteCall(t, connection, wrongKey, challenge)
+	if replay.Error == nil || replay.Error.Data.Code != "AUTHENTICATION_REQUIRED" {
+		t.Fatalf("challenge replay = %#v", replay)
+	}
+}
+
+func TestAuthenticationChallengeExpires(t *testing.T) {
+	bridge := startTestBridge(t, func(config *Config) { config.ChallengeLifetime = 10 * time.Millisecond })
+	connection := dialUnauthenticated(t, bridge, exchangeSession(t, bridge), bridge.server.Origin())
+	defer connection.CloseNow()
+	privateKey, publicKey := testClientKey(t)
+	begin := authBeginCall(t, connection, "expired-client", publicKey)
+	if begin.Error != nil {
+		t.Fatalf("begin = %#v", begin.Error)
+	}
+	time.Sleep(20 * time.Millisecond)
+	complete := authCompleteCall(t, connection, privateKey, begin.Result.(map[string]any)["challenge"].(string))
+	if complete.Error == nil || complete.Error.Data.Code != "AUTHENTICATION_REQUIRED" {
+		t.Fatalf("expired challenge = %#v", complete)
+	}
+}
+
+func TestCrossOriginPairingApprovalCannotGrantAdminAndRevocationRepairs(t *testing.T) {
+	bridge := startTestBridge(t, nil)
+	cross := dialUnauthenticated(t, bridge, nil, "https://localdraft.ai")
+	defer cross.CloseNow()
+	privateKey, publicKey := testClientKey(t)
+	begin := authBeginCall(t, cross, "cross-client", publicKey)
+	if begin.Error == nil || begin.Error.Data.Code != "PAIRING_REQUIRED" {
+		t.Fatalf("unknown client begin = %#v", begin)
+	}
+	details := begin.Error.Data.Details.(map[string]any)
+	requestID := details["requestId"].(string)
+
+	admin := dialBridge(t, bridge, exchangeSession(t, bridge), bridge.server.Origin())
+	defer admin.CloseNow()
+	approvePayload := `{"jsonrpc":"2.0","id":"approve","method":"bridge.security.approvePairingRequest","params":{"requestId":"` + requestID + `"}}`
+	if response := rpcCall(t, admin, approvePayload); response.Error != nil {
+		t.Fatalf("approve = %#v", response.Error)
+	}
+
+	begin = authBeginCall(t, cross, "cross-client", publicKey)
+	if begin.Error != nil {
+		t.Fatalf("paired begin = %#v", begin.Error)
+	}
+	complete := authCompleteCall(t, cross, privateKey, begin.Result.(map[string]any)["challenge"].(string))
+	if complete.Error != nil {
+		t.Fatalf("complete = %#v", complete.Error)
+	}
+	claims := complete.Result.(map[string]any)["claims"].(map[string]any)
+	if claims["admin"].(bool) {
+		t.Fatal("cross-origin client became admin")
+	}
+	forbidden := rpcCall(t, cross, `{"jsonrpc":"2.0","id":"settings","method":"bridge.security.getSettings"}`)
+	if forbidden.Error == nil || forbidden.Error.Data.Code != "FORBIDDEN" {
+		t.Fatalf("cross-origin admin RPC = %#v", forbidden)
+	}
+
+	revoke := rpcCall(t, admin, `{"jsonrpc":"2.0","id":"revoke","method":"bridge.security.revokePairedClient","params":{"clientId":"cross-client"}}`)
+	if revoke.Error != nil {
+		t.Fatalf("revoke = %#v", revoke.Error)
+	}
+	time.Sleep(75 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, _, err := cross.Read(ctx); err == nil {
+		t.Fatal("revoked active client remained connected")
+	}
+
+	retry := dialUnauthenticated(t, bridge, nil, "https://localdraft.ai")
+	defer retry.CloseNow()
+	begin = authBeginCall(t, retry, "cross-client", publicKey)
+	if begin.Error == nil || begin.Error.Data.Code != "PAIRING_REQUIRED" {
+		t.Fatalf("revoked client did not require pairing = %#v", begin)
 	}
 }
 
@@ -230,7 +492,7 @@ func TestBridgeHandshakeErrorsAndLogs(t *testing.T) {
 }
 
 func TestMessageLimitClosesConnection(t *testing.T) {
-	bridge := startTestBridge(t, func(config *Config) { config.MaximumMessageSize = 128 })
+	bridge := startTestBridge(t, func(config *Config) { config.MaximumMessageSize = 512 })
 	connection := dialBridge(t, bridge, exchangeSession(t, bridge), bridge.server.Origin())
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -328,7 +590,7 @@ func TestConcurrentRPCBound(t *testing.T) {
 
 func TestHealthStaticFilesAndGracefulShutdown(t *testing.T) {
 	bridge := startTestBridge(t, nil)
-	response, err := http.Get(bridge.server.Origin() + "/api/health")
+	response, err := testHTTPClient().Get(bridge.server.Origin() + "/api/health")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +598,7 @@ func TestHealthStaticFilesAndGracefulShutdown(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("health status = %d", response.StatusCode)
 	}
-	response, err = http.Get(bridge.server.Origin() + "/src/local_draft_ai.html")
+	response, err = testHTTPClient().Get(bridge.server.Origin() + "/src/local_draft_ai.html")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +606,7 @@ func TestHealthStaticFilesAndGracefulShutdown(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("static status = %d", response.StatusCode)
 	}
-	response, err = http.Get(bridge.server.Origin() + "/go.mod")
+	response, err = testHTTPClient().Get(bridge.server.Origin() + "/go.mod")
 	if err != nil {
 		t.Fatal(err)
 	}

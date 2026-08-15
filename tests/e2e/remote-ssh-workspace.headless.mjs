@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import https from "node:https";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 
-import { firstBridgeStartupURL } from "./remote-ssh-test-harness.mjs";
+import { firstBridgeStartupURL, responseStatusIgnoringCertificate, writeTestCertificate } from "./remote-ssh-test-harness.mjs";
 
 const repoRoot = process.cwd();
 const bridgeRoot = path.join(repoRoot, "bridge");
@@ -22,8 +23,19 @@ async function waitForFetch(url, timeoutMs = 15000) {
 
   while (Date.now() - started < timeoutMs) {
     try {
-      const response = await fetch(url);
-      if (response.ok) return response;
+      if (String(url).startsWith("https://")) {
+        const status = await new Promise((resolve, reject) => {
+          const request = https.get(url, { rejectUnauthorized: false }, (response) => {
+            response.resume();
+            resolve(response.statusCode || 0);
+          });
+          request.on("error", reject);
+        });
+        if (status >= 200 && status < 300) return { ok: true, status };
+      } else {
+        const response = await fetch(url);
+        if (response.ok) return response;
+      }
     } catch (error) {
       lastError = error;
     }
@@ -63,6 +75,7 @@ function startChrome(userDataDir, pageUrl) {
     "--headless=new",
     "--disable-gpu",
     "--no-sandbox",
+    "--ignore-certificate-errors",
     "--window-size=1440,900",
     "--remote-debugging-address=127.0.0.1",
     `--remote-debugging-port=${debugPort}`,
@@ -183,9 +196,13 @@ async function main() {
     const sshInfo = await firstJsonLine(sshProcess);
     assert.equal(sshInfo.connectionId, "e2e-remote");
 
+    const tls = writeTestCertificate(tempRoot);
     bridgeProcess = spawn(bridgeBinary, [
       "serve",
       "--listen", `127.0.0.1:${bridgePort}`,
+      "--public-origin", `https://127.0.0.1:${bridgePort}`,
+      "--tls-cert", tls.certificate,
+      "--tls-key", tls.key,
       "--web-root", repoRoot,
       "--config-dir", configDir
     ], {
@@ -193,15 +210,14 @@ async function main() {
       stdio: ["ignore", "pipe", "inherit"]
     });
     const startupUrl = await firstBridgeStartupURL(bridgeProcess);
-    await waitForFetch(`http://127.0.0.1:${bridgePort}/api/health`);
+    await waitForFetch(`https://127.0.0.1:${bridgePort}/api/health`);
     fs.mkdirSync(userDataDir, { recursive: true });
     chromeProcess = startChrome(userDataDir, startupUrl.href);
     connection = await connectToPage();
     const { send } = connection;
 
     await waitFor(send, `location.pathname === "/src/local_draft_ai.html" && Boolean(window.MarkdownEditor && window.MarkdownEditor.activeBridgeClient)`);
-    const reusedTokenResponse = await fetch(startupUrl, { redirect: "manual" });
-    assert.equal(reusedTokenResponse.status, 401);
+    assert.equal(await responseStatusIgnoringCertificate(startupUrl), 401);
     await evaluate(send, "location.replace('/src/local_draft_ai.html?e2e')");
     await delay(250);
     await waitFor(send, "Boolean(window.MarkdownEditor && window.MarkdownEditor.__testApi && window.MarkdownEditor.activeBridgeClient)");

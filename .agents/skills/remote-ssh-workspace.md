@@ -6,13 +6,19 @@
 
 ## Bridge security
 
-- Bind to `127.0.0.1:4782` by default. A non-loopback address requires an explicit unsafe-development flag.
-- Serve the frontend and `/api` endpoints from one local origin. Exchange a one-time 32-byte startup token for an HttpOnly, `SameSite=Strict` session cookie and invalidate the token after its first successful use.
-- Require the session cookie and an exact listen-host-and-port `Origin` for `/api/bridge`. Reject missing, public, cross-origin, and unauthenticated WebSocket requests.
-- Use JSON-RPC 2.0, protocol version 1, bounded messages and concurrency, operation timeouts, structured provider errors, and a redacted bounded in-memory log.
+- Bind to `127.0.0.1:4782` by default, but support explicit concrete or wildcard non-loopback listeners without an unsafe mode. Wildcard listeners require a canonical `--public-origin`.
+- Require `--tls-cert` and `--tls-key`, serve HTTPS/WSS directly with TLS 1.2 or newer, and never expose a parallel plaintext listener or generate certificates automatically. Validate that the exact HTTPS public origin is certificate-covered where practical.
+- Exchange the one-time 32-byte startup token for a Secure, HttpOnly, `SameSite=Strict` Bridge Admin cookie and invalidate the token after its first successful use. The cookie is administrator authorization, not general WebSocket authentication.
+- Before WSS acceptance, require an exact public Host and an exact normalized HTTPS Origin equal to the built-in bridge origin or a persisted allowed origin. Never support missing, HTTP, path-bearing, wildcard, or permissive origins.
+- Use JSON-RPC 2.0, protocol version 2, bounded messages and concurrency, operation timeouts, structured provider errors, and a redacted bounded in-memory log. Before browser authentication, allow only `bridge.auth.begin` and `bridge.auth.complete`.
+- Authenticate browsers with random, single-use, socket-bound, approximately 30-second ECDSA P-256 challenges. Persist only paired public JWKs bound to an exact client origin; browser private keys must be non-exportable IndexedDB `CryptoKey` objects.
+- Unknown cross-origin browsers create rate-limited, approximately five-minute in-memory pairing requests and require explicit approval from an authenticated bridge administrator. The bridge-served frontend may auto-pair through the same protocol when its valid admin cookie is present.
+- Grant admin claims only when the authenticated browser Origin is the public bridge origin and the admin cookie is valid. Require admin claims for allowed-origin changes, pairing approval/denial, paired-client listing, and revocation.
+- Seed `https://localdraft.ai` as the first configurable allowed origin. Keep the bridge's own origin implicit, visible as built-in, and non-removable. Removing an origin closes its current non-admin clients without deleting pairings; revocation removes public keys and closes matching sockets.
 - Serve only the repository `src/` and `assets/` trees. Do not expose the repository root, `.git`, configuration files, or an arbitrary static filesystem.
-- Browser bridge detection stays same-origin: check `/api/health`, then authenticate `/api/bridge` with the session cookie. Do not probe loopback from the hosted site.
-- Render remote status in local mode on every origin, but enable connection, folder, log, and profile commands only after an authenticated same-origin bridge handshake. Protocol mismatches remain visible and recoverable.
+- Resolve browser endpoints in this order: explicit normalized `wss://.../api/bridge` preference, same-origin `/api/health`, then unconfigured. Do not probe loopback from a hosted frontend without an explicit endpoint.
+- Keep one Bridge Settings dialog for endpoint state, pairing, and admin-only security controls. Do not create separate local-companion and remote-gateway modes.
+- Render remote status in local mode on every origin, but enable connection, folder, log, and profile commands only after an authenticated WSS bridge handshake. Protocol mismatches and connection diagnostics remain visible and recoverable.
 - Never expose an unauthenticated arbitrary-file HTTP endpoint or execute remote shell commands. Use SFTP for every remote filesystem operation.
 
 ## Remote paths and revisions

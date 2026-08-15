@@ -40,6 +40,7 @@
             <div class="ai-menu-separator" role="separator"></div>
             <button type="button" id="manageRemoteConnections" role="menuitem" data-command="remote.manageConnections"
               data-remote-command="remote.manageConnections">Manage SSH Connections…</button>
+            <button type="button" id="openBridgeSettings" role="menuitem" data-command="bridge.openSettings">Bridge Settings…</button>
             <button type="button" id="showRemoteConnectionLog" role="menuitem" data-command="remote.showLog"
               data-remote-command="remote.showLog">Show Remote Connection Log</button>
             <button type="button" id="reconnectRemote" role="menuitem" data-command="remote.reconnect"
@@ -311,6 +312,8 @@
     </footer>
 
     <div id="remoteStatusMenu" class="ai-menu remote-status-menu" role="menu" hidden>
+      <button type="button" role="menuitem" data-remote-command="bridge.openSettings">Bridge Settings…</button>
+      <div class="ai-menu-separator" role="separator"></div>
       <button type="button" role="menuitem" data-remote-command="remote.connectHost">Connect to Host…</button>
       <button type="button" role="menuitem" data-remote-command="remote.openFolder">Open Remote Folder…</button>
       <button type="button" role="menuitem" data-remote-command="remote.reconnect">Reconnect</button>
@@ -319,6 +322,53 @@
       <button type="button" role="menuitem" data-remote-command="remote.manageConnections">Manage SSH Connections…</button>
       <div class="ai-menu-separator" role="separator"></div>
       <button type="button" role="menuitem" data-remote-command="remote.closeConnection">Close Remote Connection</button>
+    </div>
+
+    <div id="bridgeSettingsOverlay" class="ai-settings-overlay bridge-settings-overlay" hidden>
+      <div id="bridgeSettingsDialog" class="ai-settings-dialog bridge-settings-dialog" role="dialog" aria-modal="true"
+        aria-labelledby="bridgeSettingsTitle">
+        <div class="ai-settings-header">
+          <h2 id="bridgeSettingsTitle">Bridge Settings</h2>
+          <button type="button" id="bridgeSettingsClose" class="icon-text ai-settings-close" aria-label="Close Bridge Settings">×</button>
+        </div>
+        <div class="ai-settings-body bridge-settings-body">
+          <fieldset class="ai-settings-mode">
+            <legend>Connection</legend>
+            <label class="ai-settings-field">Bridge Endpoint
+              <input id="bridgeEndpoint" type="url" inputmode="url" spellcheck="false" autocomplete="off"
+                placeholder="wss://bridge.example.com:4782/api/bridge">
+            </label>
+            <div class="bridge-inline-actions">
+              <button type="button" id="bridgeConnect" class="file-button">Connect</button>
+              <button type="button" id="bridgeDisconnect" class="file-button">Disconnect</button>
+            </div>
+          </fieldset>
+          <section id="bridgePairingSection" class="bridge-pairing-section" hidden>
+            <h3>Pairing required</h3>
+            <p>Code: <strong id="bridgePairingCode" class="bridge-pairing-code"></strong></p>
+            <p id="bridgePairingOrigin" class="ai-settings-note"></p>
+            <p class="ai-settings-note">Open the bridge site and approve this browser.</p>
+            <button type="button" id="bridgeOpenSite" class="file-button">Open Bridge</button>
+          </section>
+          <section id="bridgeAdminSection" class="bridge-admin-section" hidden>
+            <h3>Server Security</h3>
+            <h4>Allowed Frontend Origins</h4>
+            <div id="bridgeOriginList" class="bridge-security-list"></div>
+            <div class="bridge-add-origin">
+              <input id="bridgeNewOrigin" type="url" placeholder="https://dev.localdraft.ai" spellcheck="false">
+              <button type="button" id="bridgeAddOrigin" class="file-button">+ Add Origin</button>
+            </div>
+            <h4>Pairing Requests</h4>
+            <div id="bridgePairingList" class="bridge-security-list"></div>
+            <h4>Paired Browsers</h4>
+            <div id="bridgeClientList" class="bridge-security-list"></div>
+          </section>
+          <div id="bridgeSettingsStatus" class="ai-settings-status" aria-live="polite"></div>
+        </div>
+        <div class="ai-settings-actions">
+          <button type="button" id="bridgeSettingsDone" class="file-button">Done</button>
+        </div>
+      </div>
     </div>
 
     <div id="remoteConnectionsOverlay" class="ai-settings-overlay remote-overlay" hidden>
@@ -745,7 +795,9 @@ SOFTWARE.</pre>
   <script src="js/storage-resource.js"></script>
   <script src="js/storage-provider-registry.js"></script>
   <script src="js/local-filesystem-provider.js"></script>
+  <script src="js/bridge-auth-store.js"></script>
   <script src="js/bridge-client.js"></script>
+  <script src="js/bridge-settings.js"></script>
   <script src="js/remote-status.js"></script>
   <script src="js/remote-connection-ui.js"></script>
   <script src="js/remote-ssh-provider.js"></script>

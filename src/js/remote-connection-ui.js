@@ -616,6 +616,12 @@
         return;
       }
       subscriptions.push(bridge.on("connection.stateChanged", updateConnection));
+      subscriptions.push(bridge.on("bridge.stateChanged", function (params) {
+        if (status) {
+          status.setBridgeAvailable(params && params.state === "connected");
+        }
+        updateCommandElements(document);
+      }));
       subscriptions.push(bridge.on("connection.secretPrompt", function (params) {
         showPrompt(params, params.type === "passphrase" ? "passphrase" : "password");
       }));

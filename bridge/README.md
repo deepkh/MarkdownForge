@@ -1,11 +1,12 @@
 # LocalDraft Bridge
 
-`localdraft-bridge` provides the loopback-only native boundary for optional Remote SSH Workspaces.
+`localdraft-bridge` provides the TLS-only native boundary for optional Remote SSH Workspaces.
 
 ```text
 LocalDraftAI browser UI
-  -> authenticated same-origin JSON-RPC WebSocket
-  -> localdraft-bridge on 127.0.0.1
+  -> exact allowed HTTPS origin + paired browser key
+  -> authenticated JSON-RPC over WSS
+  -> LocalDraft Bridge
   -> SSH connection
   -> SFTP subsystem
   -> remote workspace root
@@ -16,10 +17,11 @@ The bridge serves the unchanged static frontend, keeps SSH credentials and host 
 ## Current bridge surface
 
 - `GET /api/health` returns bridge and protocol versions.
-- `GET /api/session?token=...` exchanges the one-time startup token for an HttpOnly, `SameSite=Strict` cookie and redirects to the app.
-- `/api/bridge` accepts authenticated, exact-origin JSON-RPC 2.0 WebSockets.
+- `GET /api/session?token=...` exchanges the one-time startup token for a `Secure`, HttpOnly, `SameSite=Strict` Bridge Admin cookie and redirects to the app.
+- `/api/bridge` accepts WSS only after exact public Host and allowed HTTPS Origin checks. Protocol v2 then requires ECDSA P-256 browser-key authentication before ordinary RPC routing.
 - `/src/` and `/assets/` serve only the repository's static app files. `/` and `/index.html` redirect to the app shell.
-- `bridge.hello`, `bridge.getStatus`, and `bridge.getLogs` are available at protocol version 1.
+- `bridge.auth.begin` and `bridge.auth.complete` are the only pre-authentication methods. `bridge.hello`, `bridge.getStatus`, and `bridge.getLogs` are available after authentication at protocol version 2.
+- `bridge.security.*` methods manage allowed origins, pending pairing requests, and paired browsers only for the bridge-served frontend with valid Bridge Admin claims.
 - Profile RPCs list, create, update, and remove saved connections and discover supported aliases from `~/.ssh/config`.
 - Connection RPCs connect, answer one-time host-key or secret prompts, disconnect, reconnect, inspect status, and browse absolute remote directories for folder selection.
 - Successful SSH authentication starts an SFTP client; no remote shell or LocalDraftAI remote agent is used.
@@ -38,7 +40,12 @@ go test ./...
 go vet ./...
 go build -o ../build/localdraft-bridge ./cmd/localdraft-bridge
 cd ..
-./build/localdraft-bridge serve --listen 127.0.0.1:4782 --web-root .
+./build/localdraft-bridge serve \
+  --listen 0.0.0.0:4782 \
+  --public-origin https://bridge.example.com:4782 \
+  --tls-cert /etc/localdraft/fullchain.pem \
+  --tls-key /etc/localdraft/privkey.pem \
+  --web-root .
 ```
 
 ## GitHub binary builds
@@ -57,13 +64,13 @@ The binary does not embed the static frontend. Keep it beside or point it at a L
 
 ```bash
 chmod +x localdraft-bridge-linux-x86_64
-./localdraft-bridge-linux-x86_64 serve --web-root /path/to/LocalDraftAI
+./localdraft-bridge-linux-x86_64 serve --tls-cert /path/to/cert.pem --tls-key /path/to/key.pem --web-root /path/to/LocalDraftAI
 ```
 
 On Windows:
 
 ```powershell
-.\localdraft-bridge-windows-x64.exe serve --web-root C:\path\to\LocalDraftAI
+.\localdraft-bridge-windows-x64.exe serve --tls-cert C:\path\to\cert.pem --tls-key C:\path\to\key.pem --web-root C:\path\to\LocalDraftAI
 ```
 
 Development options:
@@ -71,15 +78,17 @@ Development options:
 ```text
 --config-dir <path>
 --log-level debug|info|warn|error
---unsafe-non-loopback
+--public-origin <https-origin>
+--tls-cert <path>
+--tls-key <path>
 ```
 
-The default listener is `127.0.0.1:4782`. A non-loopback listener is rejected unless `--unsafe-non-loopback` is explicitly supplied; that flag is for isolated development only and is not a supported deployment mode.
+The default listener is `127.0.0.1:4782`. Non-loopback listeners are supported directly. A wildcard listen address requires `--public-origin`; otherwise the bridge derives it from the concrete listen address. The public origin must be an exact `https://` origin covered by the supplied certificate. Both TLS files are mandatory, TLS 1.2 is the minimum, and no plaintext listener or automatic certificate generation is provided.
 
 At startup, the bridge writes the complete one-time session URL to stdout. It never launches a browser. Copy and open:
 
 ```text
-http://127.0.0.1:4782/api/session?token=<SESSION_TOKEN>
+https://bridge.example.com:4782/api/session?token=<SESSION_TOKEN>
 ```
 
 The process output contract is:
@@ -89,9 +98,13 @@ stdout: one-time session URL
 stderr: bridge logs and diagnostics
 ```
 
-The URL contains a cryptographically random token that is invalidated after its first successful exchange. It is not added to the bridge's structured in-memory log, written to configuration, or stored in browser storage, but the URL may be captured by any process supervising stdout. The URL grants a browser session to the local bridge until its token is successfully consumed. Do not share it or store it in configuration.
+The URL contains a cryptographically random token that is invalidated after its first successful exchange. It is not added to the bridge's structured in-memory log, written to configuration, or stored in browser storage, but the URL may be captured by any process supervising stdout. The URL grants Bridge Admin access until its token is successfully consumed. Do not share it or store it in configuration.
 
-The successful exchange sets the browser session cookie and redirects to `/src/local_draft_ai.html`. The WebSocket rejects missing sessions, missing origins, public origins, and any origin whose host and port do not exactly match the bridge.
+The successful exchange sets the administrator cookie and redirects to `/src/local_draft_ai.html`. That frontend derives `wss://<public-host>/api/bridge`; its generated browser key is auto-paired only while the administrator cookie is valid. The cookie is not ordinary WebSocket authentication and is not required by paired cross-origin clients.
+
+Every browser identity uses a non-exportable ECDSA P-256 private key stored by IndexedDB. The bridge stores only the public JWK, browser label, exact frontend origin, and timestamps. An unknown cross-origin browser receives a five-minute in-memory pairing request and six-digit code. Approval must come from the bridge-served frontend with valid admin claims. Authentication challenges are random, single-use, socket-bound, and expire after about 30 seconds.
+
+The bridge's own public origin is always allowed and cannot be removed. `https://localdraft.ai` is the first-run configurable allowed origin. Additional entries must be exact HTTPS origins; wildcards and paths are not supported. Removing an origin closes active non-admin sockets without deleting pairing records. Revoking a paired browser removes its public key and closes its active sockets.
 
 ## SSH configuration and trust
 
@@ -99,12 +112,14 @@ The bridge stores connection profiles and its own host-key database under the pl
 
 ```text
 <user-config-dir>/LocalDraftAI/connections.json
+<user-config-dir>/LocalDraftAI/bridge-settings.json
+<user-config-dir>/LocalDraftAI/paired-clients.json
 <user-config-dir>/LocalDraftAI/known_hosts
 ```
 
 `os.UserConfigDir()` selects the base directory: normally `$XDG_CONFIG_HOME` or `$HOME/.config` on Linux, `$HOME/Library/Application Support` on macOS, and `%AppData%` on Windows. `--config-dir` replaces that base for development or portable testing.
 
-Profiles contain host, port, user, authentication preferences, an optional identity-file path, and an optional default folder. They never contain passwords, passphrases, or private-key contents. Profile writes are atomic and use restrictive permissions where the platform supports them.
+Profiles contain host, port, user, authentication preferences, an optional identity-file path, and an optional default folder. Bridge settings contain only allowed origins, and paired-client records contain only public browser identity data. They never contain passwords, passphrases, browser private keys, or SSH private-key contents. Configuration writes are atomic and use restrictive permissions where the platform supports them.
 
 The connection manager tries the SSH agent, then the configured identity file, then a session-only passphrase for an encrypted identity, and finally a session-only password when allowed. Secrets are bound to a single prompt and discarded after the attempt. Connections use a 15-second timeout and a 30-second keepalive. After three consecutive keepalive failures, the bridge closes the failed clients and makes at most three retryable reconnect attempts after approximately 1, 2, and 4 seconds. Explicit Disconnect cancels the retry loop, and authentication or host-key failures are not retried automatically.
 
@@ -134,11 +149,11 @@ Remote Save, Save As, New File, New Folder, Rename, and Duplicate are enabled on
 
 `fs.searchText` traverses through SFTP without invoking a shell. It scans only the LocalDraftAI text extensions, skips files over 10 MB plus unreadable or invalid UTF-8 files, checks request cancellation, visits at most 20,000 regular files, and returns at most 500 matches with truncation, visit, and warning metadata. Remote restore remains browser-orchestrated: after explicit user action the browser reconnects a saved profile, calls `workspace.open`, and rereads saved tab paths; the bridge never stores document contents. Related link checks use workspace-scoped `fs.stat` calls without recursive discovery.
 
-`fs.readBinary` and `fs.writeBinary` accept only PNG, JPEG, WebP, and GIF files whose detected content matches the filename extension. They apply the same canonical-root, parent, and symlink guards as text operations and reject assets above 25 MB. The JSON-RPC layer transfers at most 4 MB of raw binary data per base64 chunk, bounds incomplete uploads to eight in-memory assemblies, expires abandoned assemblies, and atomically writes and verifies only the completed image. The browser creates authenticated per-tab object URLs; the bridge exposes no arbitrary-path image HTTP endpoint. The hosted `https://localdraft.ai/` app remains local-only and does not probe a loopback bridge.
+`fs.readBinary` and `fs.writeBinary` accept only PNG, JPEG, WebP, and GIF files whose detected content matches the filename extension. They apply the same canonical-root, parent, and symlink guards as text operations and reject assets above 25 MB. The JSON-RPC layer transfers at most 4 MB of raw binary data per base64 chunk, bounds incomplete uploads to eight in-memory assemblies, expires abandoned assemblies, and atomically writes and verifies only the completed image. The browser creates authenticated per-tab object URLs; the bridge exposes no arbitrary-path image HTTP endpoint. The hosted `https://localdraft.ai/` app connects only when the user configures an allowed WSS endpoint and pairs the browser.
 
 ## Release limitations
 
-- Remote mode runs only from the bridge-served loopback origin; the hosted site remains local-file editing only.
+- Remote mode works from the bridge-served HTTPS origin or an explicitly configured, allowed, paired HTTPS frontend such as `https://localdraft.ai`.
 - One workspace provider and one remote host are active per application window; mixed local/remote workspace tabs are not supported.
 - There is no terminal, remote command execution, Git UI, debugger, language server, remote extension, port forwarding, `ProxyJump`, or `ProxyCommand` support.
 - Remote delete, symlink creation, offline synchronization, mirror folders, persistent dirty-buffer recovery, and Windows-style remote roots are not implemented.

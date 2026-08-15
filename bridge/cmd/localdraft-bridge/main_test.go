@@ -11,11 +11,11 @@ import (
 
 func TestWriteStartupURL(t *testing.T) {
 	var output bytes.Buffer
-	if err := writeStartupURL(&output, "http://127.0.0.1:4782/api/session?token=abc_DEF-123"); err != nil {
+	if err := writeStartupURL(&output, "https://127.0.0.1:4782/api/session?token=abc_DEF-123"); err != nil {
 		t.Fatal(err)
 	}
 
-	const expected = "http://127.0.0.1:4782/api/session?token=abc_DEF-123\n"
+	const expected = "https://127.0.0.1:4782/api/session?token=abc_DEF-123\n"
 	if output.String() != expected {
 		t.Fatalf("startup URL output = %q, want %q", output.String(), expected)
 	}
@@ -65,7 +65,7 @@ func (writer errorWriter) Write([]byte) (int, error) {
 
 func TestWriteStartupURLReturnsWriterError(t *testing.T) {
 	expected := errors.New("stdout unavailable")
-	err := writeStartupURL(errorWriter{err: expected}, "http://127.0.0.1:4782/api/session?token=abc_DEF-123")
+	err := writeStartupURL(errorWriter{err: expected}, "https://127.0.0.1:4782/api/session?token=abc_DEF-123")
 	if !errors.Is(err, expected) {
 		t.Fatalf("writeStartupURL error = %v, want %v", err, expected)
 	}

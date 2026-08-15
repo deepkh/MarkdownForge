@@ -45,7 +45,7 @@
         state: bridgeAvailable ? "local-ready" : "local",
         title: bridgeAvailable
           ? "Local mode — select to connect with SSH"
-          : "Local mode — remote SSH requires the LocalDraft Bridge"
+          : "Local mode — configure LocalDraft Bridge to use remote SSH"
       };
     }
 
@@ -83,6 +83,7 @@
       connectionState === "waiting-for-host-key" || connectionState === "waiting-for-secret" || connectionState === "closing";
 
     return {
+      "bridge.openSettings": true,
       "remote.closeConnection": Boolean(bridgeAvailable && connectionId && connectionState !== "disconnected" && connectionState !== "closing"),
       "remote.connectHost": bridgeAvailable && !busy,
       "remote.manageConnections": bridgeAvailable && !busy,

@@ -15,6 +15,7 @@
   var storageProviders = ME.storageProviders;
   var localFilesystemProvider = ME.localFilesystemProvider;
   var bridgeClient = ME.bridgeClient;
+  var bridgeSettingsModule = ME.bridgeSettings;
   var remoteStatus = ME.remoteStatus;
   var remoteConnectionUI = ME.remoteConnectionUI;
   var remoteSSHProviderModule = ME.remoteSSHProvider;
@@ -229,6 +230,7 @@
   var activityBar;
   var remoteStatusController;
   var remoteConnectionController;
+  var bridgeSettingsController;
   var remoteSSHProvider;
   var remoteConnectionState = "disconnected";
   var remoteConnectionWasUnavailable = false;
@@ -5762,6 +5764,9 @@
     register("remote.closeConnection", function () {
       return remoteConnectionController && remoteConnectionController.disconnect();
     });
+    register("bridge.openSettings", function () {
+      return bridgeSettingsController && bridgeSettingsController.open();
+    });
 
     register("ai.openAssistant", function () {
       if (aiAssistant) {
@@ -6490,6 +6495,36 @@
       });
     }
 
+    if (bridgeSettingsModule) {
+      bridgeSettingsController = bridgeSettingsModule.create({
+        bridgeClient: bridgeClient,
+        overlay: document.getElementById("bridgeSettingsOverlay"),
+        elements: {
+          addOrigin: document.getElementById("bridgeAddOrigin"),
+          adminSection: document.getElementById("bridgeAdminSection"),
+          clientList: document.getElementById("bridgeClientList"),
+          close: document.getElementById("bridgeSettingsClose"),
+          connect: document.getElementById("bridgeConnect"),
+          disconnect: document.getElementById("bridgeDisconnect"),
+          done: document.getElementById("bridgeSettingsDone"),
+          endpoint: document.getElementById("bridgeEndpoint"),
+          newOrigin: document.getElementById("bridgeNewOrigin"),
+          openBridge: document.getElementById("bridgeOpenSite"),
+          originList: document.getElementById("bridgeOriginList"),
+          pairingCode: document.getElementById("bridgePairingCode"),
+          pairingList: document.getElementById("bridgePairingList"),
+          pairingOrigin: document.getElementById("bridgePairingOrigin"),
+          pairingSection: document.getElementById("bridgePairingSection"),
+          status: document.getElementById("bridgeSettingsStatus")
+        },
+        onClientChange: function (client) {
+          ME.activeBridgeClient = client;
+          if (remoteConnectionController) remoteConnectionController.setBridgeClient(client);
+          refreshRecentWorkspaces();
+        }
+      });
+    }
+
     viewport = ME.viewport.create({
       getActiveMode: getActiveMode,
       getMarkdownText: getMarkdownText,
@@ -6741,6 +6776,9 @@
     if (remoteConnectionController) {
       remoteConnectionController.bindEvents();
     }
+    if (bridgeSettingsController) {
+      bridgeSettingsController.bindEvents();
+    }
     aiAssistant.bindEvents();
     if (activityBar) {
       activityBar.bindEvents();
@@ -6752,12 +6790,17 @@
     if (bridgeClient && typeof bridgeClient.detect === "function") {
       bridgeClient.detect().then(function (client) {
         ME.activeBridgeClient = client;
+        if (bridgeSettingsController) bridgeSettingsController.setClient(client);
         if (remoteConnectionController) {
           remoteConnectionController.setBridgeClient(client);
         }
         refreshRecentWorkspaces();
       }).catch(function (error) {
         ME.bridgeDetectionError = error;
+        if (bridgeSettingsController && error.client) {
+          bridgeSettingsController.setClient(error.client);
+          if (error.code === "PAIRING_REQUIRED") bridgeSettingsController.open();
+        }
         if (remoteConnectionController) {
           remoteConnectionController.setBridgeError(error);
         }

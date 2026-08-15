@@ -28,11 +28,13 @@ func run(arguments []string) error {
 		return errors.New("usage: localdraft-bridge serve [options]")
 	}
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
-	listenAddress := flags.String("listen", appserver.DefaultListenAddress, "loopback listen address")
+	listenAddress := flags.String("listen", appserver.DefaultListenAddress, "listen address")
+	publicOrigin := flags.String("public-origin", "", "canonical HTTPS bridge origin")
+	tlsCert := flags.String("tls-cert", "", "TLS certificate chain file")
+	tlsKey := flags.String("tls-key", "", "TLS private key file")
 	webRoot := flags.String("web-root", ".", "LocalDraftAI repository web root")
 	configDir := flags.String("config-dir", "", "bridge configuration directory")
 	logLevel := flags.String("log-level", "info", "bridge log level")
-	unsafeNonLoopback := flags.Bool("unsafe-non-loopback", false, "allow a non-loopback development listener")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return err
 	}
@@ -42,7 +44,7 @@ func run(arguments []string) error {
 	if *logLevel != "debug" && *logLevel != "info" && *logLevel != "warn" && *logLevel != "error" {
 		return errors.New("log level must be debug, info, warn, or error")
 	}
-	if err := appserver.ValidateListenAddress(*listenAddress, *unsafeNonLoopback); err != nil {
+	if err := appserver.ValidateListenAddress(*listenAddress); err != nil {
 		return err
 	}
 	listener, err := net.Listen("tcp", *listenAddress)
@@ -52,10 +54,12 @@ func run(arguments []string) error {
 	defer listener.Close()
 
 	server, err := appserver.New(appserver.Config{
-		ListenAddress:     listener.Addr().String(),
-		WebRoot:           *webRoot,
-		ConfigDir:         *configDir,
-		UnsafeNonLoopback: *unsafeNonLoopback,
+		ListenAddress: listener.Addr().String(),
+		PublicOrigin:  *publicOrigin,
+		TLSCertFile:   *tlsCert,
+		TLSKeyFile:    *tlsKey,
+		WebRoot:       *webRoot,
+		ConfigDir:     *configDir,
 	})
 	if err != nil {
 		return err

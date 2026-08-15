@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import https from "node:https";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
@@ -14,8 +15,19 @@ async function waitForFetch(url, timeoutMs = 15000) {
 
   while (Date.now() - started < timeoutMs) {
     try {
-      const response = await fetch(url);
-      if (response.ok) return response;
+      if (String(url).startsWith("https://")) {
+        const status = await new Promise((resolve, reject) => {
+          const request = https.get(url, { rejectUnauthorized: false }, (response) => {
+            response.resume();
+            resolve(response.statusCode || 0);
+          });
+          request.on("error", reject);
+        });
+        if (status >= 200 && status < 300) return { ok: true, status };
+      } else {
+        const response = await fetch(url);
+        if (response.ok) return response;
+      }
     } catch (error) {
       lastError = error;
     }
@@ -73,7 +85,7 @@ export function firstBridgeStartupURL(child, timeoutMs = 10000) {
         finish(new Error(`Bridge stdout did not contain a valid startup URL: ${JSON.stringify(line)}`));
         return;
       }
-      if (startupUrl.protocol !== "http:" || startupUrl.pathname !== "/api/session" || !/^[A-Za-z0-9_-]+$/.test(startupUrl.searchParams.get("token") || "")) {
+      if (startupUrl.protocol !== "https:" || startupUrl.pathname !== "/api/session" || !/^[A-Za-z0-9_-]+$/.test(startupUrl.searchParams.get("token") || "")) {
         finish(new Error(`Bridge stdout did not contain a valid session URL: ${JSON.stringify(line)}`));
         return;
       }
@@ -112,12 +124,35 @@ function startChrome(userDataDir, pageUrl, debugPort) {
     "--headless=new",
     "--disable-gpu",
     "--no-sandbox",
+    "--ignore-certificate-errors",
     "--window-size=1440,900",
     "--remote-debugging-address=127.0.0.1",
     `--remote-debugging-port=${debugPort}`,
     `--user-data-dir=${userDataDir}`,
     pageUrl
   ], { stdio: "ignore" });
+}
+
+export function writeTestCertificate(tempRoot) {
+  const certificate = path.join(tempRoot, "bridge-cert.pem");
+  const key = path.join(tempRoot, "bridge-key.pem");
+  const result = spawnSync("openssl", [
+    "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+    "-keyout", key, "-out", certificate, "-subj", "/CN=127.0.0.1",
+    "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost"
+  ], { encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`Could not create the E2E TLS certificate: ${result.stderr || result.stdout}`);
+  return { certificate, key };
+}
+
+export function responseStatusIgnoringCertificate(url) {
+  return new Promise((resolve, reject) => {
+    const request = https.get(url, { rejectUnauthorized: false }, (response) => {
+      response.resume();
+      resolve(response.statusCode || 0);
+    });
+    request.on("error", reject);
+  });
 }
 
 async function connectToPage(debugPort) {
@@ -249,9 +284,13 @@ export async function startRemoteWorkspaceFixture(options = {}) {
       stdio: ["ignore", "pipe", "inherit"]
     });
     const sshInfo = await firstJsonLine(sshProcess);
+    const tls = writeTestCertificate(tempRoot);
     bridgeProcess = spawn(bridgeBinary, [
       "serve",
       "--listen", `127.0.0.1:${bridgePort}`,
+      "--public-origin", `https://127.0.0.1:${bridgePort}`,
+      "--tls-cert", tls.certificate,
+      "--tls-key", tls.key,
       "--web-root", repoRoot,
       "--config-dir", configDir
     ], {
@@ -259,16 +298,16 @@ export async function startRemoteWorkspaceFixture(options = {}) {
       stdio: ["ignore", "pipe", "inherit"]
     });
     const startupUrl = await firstBridgeStartupURL(bridgeProcess);
-    await waitForFetch(`http://127.0.0.1:${bridgePort}/api/health`);
+    await waitForFetch(`https://127.0.0.1:${bridgePort}/api/health`);
     fs.mkdirSync(userDataDir, { recursive: true });
     chromeProcess = startChrome(userDataDir, startupUrl.href, debugPort);
     connection = await connectToPage(debugPort);
     const { send } = connection;
 
     await waitFor(send, `location.pathname === "/src/local_draft_ai.html" && Boolean(window.MarkdownEditor && window.MarkdownEditor.activeBridgeClient)`);
-    const reusedTokenResponse = await fetch(startupUrl, { redirect: "manual" });
-    if (reusedTokenResponse.status !== 401) {
-      throw new Error(`Reused bridge startup token returned HTTP ${reusedTokenResponse.status}, expected 401.`);
+    const reusedTokenStatus = await responseStatusIgnoringCertificate(startupUrl);
+    if (reusedTokenStatus !== 401) {
+      throw new Error(`Reused bridge startup token returned HTTP ${reusedTokenStatus}, expected 401.`);
     }
     await evaluate(send, "location.replace('/src/local_draft_ai.html?e2e')");
     await delay(250);

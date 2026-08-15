@@ -90,7 +90,7 @@ func (s *Server) handleSession(response http.ResponseWriter, request *http.Reque
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   false,
+		Secure:   true,
 		MaxAge:   int(s.config.SessionLifetime.Seconds()),
 	})
 	response.Header().Set("Cache-Control", "no-store")

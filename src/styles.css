@@ -2988,6 +2988,80 @@
       border-top: 1px solid var(--border);
     }
 
+    .bridge-settings-dialog {
+      width: min(720px, calc(100vw - 32px));
+      max-height: min(820px, calc(100vh - 32px));
+    }
+
+    .bridge-settings-body {
+      overflow-y: auto;
+    }
+
+    .bridge-inline-actions,
+    .bridge-add-origin {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .bridge-add-origin input {
+      min-width: 0;
+      flex: 1;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--panel);
+      color: var(--text);
+      padding: 8px;
+    }
+
+    .bridge-pairing-section,
+    .bridge-admin-section {
+      border-top: 1px solid var(--border);
+      padding-top: 14px;
+    }
+
+    .bridge-pairing-code {
+      font-family: var(--font-monospace, ui-monospace, monospace);
+      font-size: 24px;
+      letter-spacing: .08em;
+    }
+
+    .bridge-admin-section h3,
+    .bridge-admin-section h4,
+    .bridge-pairing-section h3 {
+      margin: 0 0 10px;
+    }
+
+    .bridge-admin-section h4 {
+      margin-top: 18px;
+      font-size: 13px;
+    }
+
+    .bridge-security-list {
+      display: grid;
+      gap: 6px;
+    }
+
+    .bridge-security-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 8px;
+      overflow-wrap: anywhere;
+    }
+
+    .bridge-security-row-stacked {
+      flex-wrap: wrap;
+      justify-content: flex-start;
+    }
+
+    .bridge-security-row-stacked span {
+      flex-basis: 100%;
+    }
+
     .ai-action-config-dialog {
       width: min(100%, 820px);
       max-height: min(820px, calc(100vh - 48px));

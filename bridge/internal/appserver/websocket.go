@@ -3,12 +3,15 @@ package appserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/coder/websocket"
 
+	bridgeconfig "localdraftai/bridge/internal/config"
 	"localdraftai/bridge/internal/protocol"
 )
 
@@ -16,6 +19,11 @@ type notification struct {
 	JSONRPC string `json:"jsonrpc"`
 	Method  string `json:"method"`
 	Params  any    `json:"params"`
+}
+
+type browserConnection struct {
+	writes *sync.Mutex
+	auth   *socketAuth
 }
 
 func (s *Server) broadcastNotification(method string, params any) {
@@ -26,41 +34,47 @@ func (s *Server) broadcastNotification(method string, params any) {
 	s.connectionMu.Lock()
 	type target struct {
 		connection *websocket.Conn
-		writes     *sync.Mutex
+		state      *browserConnection
 	}
 	targets := make([]target, 0, len(s.connections))
-	for connection, writes := range s.connections {
-		targets = append(targets, target{connection: connection, writes: writes})
+	for connection, state := range s.connections {
+		if _, authenticated := state.auth.claimsValue(); authenticated {
+			targets = append(targets, target{connection: connection, state: state})
+		}
 	}
 	s.connectionMu.Unlock()
 	for _, target := range targets {
-		target.writes.Lock()
+		target.state.writes.Lock()
 		writeContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = target.connection.Write(writeContext, websocket.MessageText, payload)
 		cancel()
-		target.writes.Unlock()
+		target.state.writes.Unlock()
 	}
 }
 
 func (s *Server) handleWebSocket(response http.ResponseWriter, request *http.Request) {
-	if !s.sessions.validRequest(request) {
-		http.Error(response, "Bridge session required", http.StatusUnauthorized)
+	if !strings.EqualFold(request.Host, s.publicHost) {
+		http.Error(response, "Unexpected bridge Host", http.StatusForbidden)
 		return
 	}
-	if request.Header.Get("Origin") != s.origin {
+	origin, err := s.authorizedOrigin(request.Header.Get("Origin"))
+	if err != nil {
 		http.Error(response, "Unexpected WebSocket origin", http.StatusForbidden)
 		return
 	}
 	connection, err := websocket.Accept(response, request, &websocket.AcceptOptions{
-		OriginPatterns: []string{request.Host},
+		InsecureSkipVerify: true,
 	})
 	if err != nil {
 		return
 	}
 	connection.SetReadLimit(s.config.MaximumMessageSize)
-	writes := &sync.Mutex{}
+	state := &browserConnection{
+		writes: &sync.Mutex{},
+		auth:   &socketAuth{origin: origin, adminSession: s.sessions.validRequest(request)},
+	}
 	s.connectionMu.Lock()
-	s.connections[connection] = writes
+	s.connections[connection] = state
 	s.connectionMu.Unlock()
 	s.logs.Append("info", "websocket", "browser bridge session connected")
 	defer func() {
@@ -70,10 +84,30 @@ func (s *Server) handleWebSocket(response http.ResponseWriter, request *http.Req
 		_ = connection.Close(websocket.StatusNormalClosure, "bridge session closed")
 		s.logs.Append("info", "websocket", "browser bridge session disconnected")
 	}()
-	s.serveWebSocket(request.Context(), connection, writes)
+	s.serveWebSocket(request.Context(), connection, state)
 }
 
-func (s *Server) serveWebSocket(ctx context.Context, connection *websocket.Conn, writes *sync.Mutex) {
+func (s *Server) authorizedOrigin(value string) (string, error) {
+	origin, err := bridgeconfig.NormalizeHTTPSOrigin(value)
+	if err != nil {
+		return "", err
+	}
+	if origin == s.origin {
+		return origin, nil
+	}
+	allowed, err := s.securityStore.List()
+	if err != nil {
+		return "", err
+	}
+	for _, candidate := range allowed {
+		if origin == candidate {
+			return origin, nil
+		}
+	}
+	return "", errors.New("origin is not allowed")
+}
+
+func (s *Server) serveWebSocket(ctx context.Context, connection *websocket.Conn, state *browserConnection) {
 	semaphore := make(chan struct{}, s.config.MaximumConcurrent)
 	var calls sync.WaitGroup
 	defer calls.Wait()
@@ -95,8 +129,8 @@ func (s *Server) serveWebSocket(ctx context.Context, connection *websocket.Conn,
 				return
 			}
 		}
-		writes.Lock()
-		defer writes.Unlock()
+		state.writes.Lock()
+		defer state.writes.Unlock()
 		writeContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = connection.Write(writeContext, websocket.MessageText, payload)
@@ -120,10 +154,31 @@ func (s *Server) serveWebSocket(ctx context.Context, connection *websocket.Conn,
 			writeResponse(protocol.Failure(request.ID, protocol.NewError(protocol.InvalidRequestCode, "Invalid Request")))
 			continue
 		}
+		authenticatedClaims, authenticated := state.auth.claimsValue()
+		if !authenticated {
+			var result any
+			var rpcError *protocol.Error
+			switch request.Method {
+			case "bridge.auth.begin":
+				result, rpcError = s.beginClientAuthentication(state.auth, request.Params)
+			case "bridge.auth.complete":
+				result, rpcError = s.completeClientAuthentication(state.auth, request.Params)
+			default:
+				rpcError = protocol.NewStorageError(-32042, "AUTHENTICATION_REQUIRED", "Authenticate this browser before using the bridge.", false, nil)
+			}
+			if !request.IsNotification() {
+				if rpcError != nil {
+					writeResponse(protocol.Failure(request.ID, rpcError))
+				} else {
+					writeResponse(protocol.Success(request.ID, result))
+				}
+			}
+			continue
+		}
 
 		semaphore <- struct{}{}
 		calls.Add(1)
-		go func(request protocol.Request) {
+		go func(request protocol.Request, claims ClientClaims) {
 			defer calls.Done()
 			defer func() { <-semaphore }()
 			defer func() {
@@ -137,6 +192,7 @@ func (s *Server) serveWebSocket(ctx context.Context, connection *websocket.Conn,
 			}
 			callContext, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
+			callContext = context.WithValue(callContext, claimsContextKey{}, claims)
 			result, rpcError := s.router.Handle(callContext, request)
 			if request.IsNotification() {
 				return
@@ -146,6 +202,6 @@ func (s *Server) serveWebSocket(ctx context.Context, connection *websocket.Conn,
 				return
 			}
 			writeResponse(protocol.Success(request.ID, result))
-		}(request)
+		}(request, authenticatedClaims)
 	}
 }

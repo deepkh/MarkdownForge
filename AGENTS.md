@@ -34,7 +34,9 @@ src/js/document-session.js   Per-tab document state
 src/js/storage-resource.js   Provider-neutral document resource identity and revision metadata
 src/js/storage-provider-registry.js Storage provider lookup and normalized errors
 src/js/local-filesystem-provider.js Local File System Access provider
-src/js/bridge-client.js       Authenticated same-origin JSON-RPC bridge client and detection
+src/js/bridge-client.js       Configurable authenticated WSS bridge client and detection
+src/js/bridge-auth-store.js   IndexedDB/WebCrypto paired browser identity
+src/js/bridge-settings.js     Unified endpoint, pairing, and administrator security UI
 src/js/remote-status.js       Remote Status Bar state, labels, menu, and command availability
 src/js/remote-connection-ui.js SSH profile, prompt, folder selection, and connection-log dialogs
 src/js/remote-ssh-provider.js Remote SSH document and workspace storage provider
@@ -178,14 +180,16 @@ If a new subsystem is added, create or update a small skill file in `.agents/ski
 - Each open document tab owns its own title, dirty state, active mode, scroll state, undo/redo history, file handle, workspace folder, and image object URLs.
 - Every document session has a provider ID, normalized storage resource, and revision. Legacy local file and workspace handles remain compatibility fields; provider-neutral application code uses storage resources.
 - Local File System Access picker, read, write, directory traversal, and workspace mutation calls belong in `local-filesystem-provider.js`. Local asset storage may retain narrowly scoped browser file calls in `asset-store.js`.
-- The optional Go bridge binds to loopback by default, serves only `src/` and `assets/`, writes its complete one-time session URL once to stdout without launching a browser, exchanges its token for an HttpOnly strict-same-site cookie, and accepts WebSockets only from its exact authenticated origin.
+- The optional Go bridge binds to loopback by default but supports explicit non-loopback listeners, serves only `src/` and `assets/` over TLS, writes its complete one-time administrator URL once to stdout without launching a browser, and has no plaintext HTTP/WS listener.
 - The bridge binary workflow runs Go tests and vet before CGO-disabled Linux x86-64, Linux AArch64, and Windows x64 cross-builds. Version tags publish all three binaries with SHA-256 checksums; binaries continue to require an explicit LocalDraftAI static `--web-root`.
-- Bridge JSON-RPC protocol version 1 limits messages to 16 MB, concurrent calls to 8, normal operations to 30 seconds, search to 120 seconds, and its redacted in-memory log to 200 structured entries.
+- Bridge JSON-RPC protocol version 2 requires paired ECDSA P-256 browser authentication before ordinary RPCs and limits messages to 16 MB, concurrent calls to 8, normal operations to 30 seconds, search to 120 seconds, and its redacted in-memory log to 200 structured entries.
 - Bridge connection profiles are stored atomically without secrets. SSH authentication tries the agent before a configured identity and uses prompt-scoped passphrases or passwords only in process memory. Unknown host keys require fingerprint confirmation in the bridge-managed `known_hosts`; changed keys are blocked.
 - OpenSSH discovery supports exact host aliases and only `Host`, `HostName`, `User`, `Port`, `IdentityFile`, `IdentitiesOnly`, and `UserKnownHostsFile`. Do not write OpenSSH configuration or user-managed known-host files, and do not imply support for deferred proxy, forwarding, certificate, PKCS#11, or connection-sharing options.
 - Connected SSH sessions own an SFTP client, use a 15-second connection timeout and a 30-second keepalive, and close after three consecutive keepalive failures. Remote shell commands remain out of scope.
-- The static app detects a bridge only through same-origin `/api/health`; the hosted site does not probe loopback. Remote command controls remain disabled unless that handshake succeeds.
-- The Remote Status Bar item always identifies local or SSH state. SSH commands are enabled only after an authenticated same-origin bridge handshake; hosted and standalone static origins keep them disabled.
+- The static app resolves a bridge from an explicit stored WSS endpoint first, then same-origin `/api/health`, and otherwise remains unconfigured. A hosted site with no endpoint does not probe loopback.
+- Bridge admission requires TLS, an exact configured public Host, an exact built-in or configured HTTPS frontend Origin, and paired browser-key authentication. The bridge's own origin plus a valid Secure HttpOnly strict-same-site admin cookie adds administrator claims; cross-origin paired clients never receive them.
+- Allowed origins and paired public keys are stored atomically in `bridge-settings.json` and `paired-clients.json`. Browser private keys are non-exportable and persist only as IndexedDB `CryptoKey` objects. Removing an origin or revoking a client closes affected authenticated sockets.
+- The Remote Status Bar item always identifies local or SSH state. SSH commands are enabled only after an authenticated WSS bridge handshake from either the bridge-served or a configured hosted frontend.
 - Remote connection UI owns profile management, host-key confirmation, prompt-scoped password/passphrase entry, remote folder selection, and the redacted connection log. Clear secret inputs before requests settle, never use browser storage for them, and do not switch workspaces until the selected folder opens successfully.
 - A bridge-served Remote SSH workspace uses `remote-ssh`, opens only after SFTP canonicalizes its absolute root, and passes only workspace-relative POSIX paths after opening. Existing targets must resolve at or below the canonical root; reject absolute, dot, dot-dot, Windows, UNC, root-prefix, and symlink-escape paths.
 - Local Explorer trees are eager and omit directories without registered supported-document descendants. A directory created through Explorer may be preserved in memory for the current workspace session until it gains a supported descendant or the workspace changes.
