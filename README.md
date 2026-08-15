@@ -165,7 +165,77 @@ The hosted and standalone UI uses the `local-fsa` provider. The authenticated br
 
 The repository includes one isolated Go bridge module under `bridge/`. LocalDraft Bridge serves HTTPS and WSS directly, keeps SSH/SFTP outside the browser, checks the configured public Host and exact HTTPS frontend origin, and authenticates browsers with paired non-exportable WebCrypto keys. There are no separate local-companion or remote-gateway modes.
 
-The bridge requires a certificate and private key. Browsers must trust that certificate. For a production listener:
+The bridge requires a certificate and private key. Browsers must trust that certificate.
+
+#### Run the bridge locally
+
+1. Check that Go 1.25 or newer is installed:
+
+   ```bash
+   go version
+   ```
+
+2. Build the bridge from the repository root:
+
+   ```bash
+   mkdir -p build
+   cd bridge
+   go build -o ../build/localdraft-bridge ./cmd/localdraft-bridge
+   cd ..
+   ```
+
+3. Create a browser-trusted development certificate. If [`mkcert`](https://github.com/FiloSottile/mkcert) is installed, use:
+
+   ```bash
+   mkcert -install
+   mkdir -p /tmp/localdraft-bridge-certs
+   mkcert \
+     -cert-file /tmp/localdraft-bridge-certs/cert.pem \
+     -key-file /tmp/localdraft-bridge-certs/key.pem \
+     127.0.0.1 localhost ::1
+   ```
+
+   Alternatively, OpenSSL can create a self-signed certificate:
+
+   ```bash
+   mkdir -p /tmp/localdraft-bridge-certs
+   openssl req -x509 \
+     -newkey rsa:2048 \
+     -sha256 \
+     -nodes \
+     -days 30 \
+     -keyout /tmp/localdraft-bridge-certs/key.pem \
+     -out /tmp/localdraft-bridge-certs/cert.pem \
+     -subj "/CN=127.0.0.1" \
+     -addext "subjectAltName=IP:127.0.0.1,DNS:localhost"
+   ```
+
+   A self-signed OpenSSL certificate must be imported into the operating system or browser trust store before WSS connections will work. Do not disable browser certificate verification for normal use.
+
+4. Start the bridge from the repository root:
+
+   ```bash
+   ./build/localdraft-bridge serve \
+     --listen 127.0.0.1:4782 \
+     --public-origin https://127.0.0.1:4782 \
+     --tls-cert /tmp/localdraft-bridge-certs/cert.pem \
+     --tls-key /tmp/localdraft-bridge-certs/key.pem \
+     --web-root .
+   ```
+
+5. Copy the complete one-time `https://127.0.0.1:4782/api/session?token=...` URL printed on stdout and open it in the browser that will use LocalDraftAI. The bridge-served frontend redirects into the editor, derives `wss://127.0.0.1:4782/api/bridge`, and automatically pairs that browser through the administrator session.
+
+6. In LocalDraftAI, choose `Workspace -> Connect to Remote Host…`, create or select an SSH profile, verify any first-use host-key fingerprint, authenticate, and then choose `Workspace -> Open Remote Folder…`.
+
+7. To use the hosted `https://localdraft.ai` frontend, open its `Bridge Settings`, enter `wss://127.0.0.1:4782/api/bridge`, choose Connect, and approve its six-digit pairing request from the bridge-served administrator page.
+
+8. Keep the terminal process running while using remote files. Press `Ctrl+C` to stop the bridge.
+
+The bridge does not create certificates automatically. Files under `/tmp` may disappear after a restart; generate or copy long-lived certificates elsewhere if needed.
+
+#### Production listener
+
+For a production listener:
 
 ```bash
 mkdir -p build
